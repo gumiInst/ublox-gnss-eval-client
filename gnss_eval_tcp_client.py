@@ -77,6 +77,7 @@ def evaluate_data(json_str, gt_latitude, gt_longitude):
             return None
 
         msg_time = data.get('timestamp', 'N/A') # Timestamp from message, if available
+        gnss_time = data.get('gnss_time', 'N/A') # GNSS time, if available
         lat = data.get('lat')
         lon = data.get('lon')
         fix_type = data.get('type', 'N/A') # e.g., 'GGA_FIX_RTK_FIXED', 'GGA_FIX_INVALID'
@@ -104,23 +105,29 @@ def evaluate_data(json_str, gt_latitude, gt_longitude):
         utm_zone = get_utm_zone(lat, lon)
         transformer = pyproj.Proj(proj='utm', zone=utm_zone, ellps='WGS84', south=lat < 0)
 
-        # Transform current and ground truth coordinates to UTM
-        easting, northing = transformer(lon, lat)
-        gt_easting, gt_northing = transformer(gt_longitude, gt_latitude)
+        northing_error = None
+        easting_error = None
+        horizontal_error_2d = None # Horizontal Position Error (HPE) in meters
+        
+        if gt_latitude is not None and gt_longitude is not None:
+            # Transform current and ground truth coordinates to UTM
+            easting, northing = transformer(lon, lat)
+            gt_easting, gt_northing = transformer(gt_longitude, gt_latitude)
 
-        # Calculate errors
-        northing_error = northing - gt_northing
-        easting_error = easting - gt_easting
-        horizontal_error_2d = math.sqrt(northing_error**2 + easting_error**2) # This is often same as hpe from receiver if fix is good.
+            # Calculate errors
+            northing_error = northing - gt_northing
+            easting_error = easting - gt_easting
+            horizontal_error_2d = math.sqrt(northing_error**2 + easting_error**2) # This is often same as hpe from receiver if fix is good.
 
         processed_info = {
             "timestamp": msg_time, #format_timestamp_to_kst(msg_time),
+            "gnss_time": gnss_time, # Keep original GNSS time if available
             "lat": lat,
             "lon": lon,
             "fix_type": str(fix_type),
-            "hpe": horizontal_error_2d, # Horizontal Position Error (HPE) in meters
-            "northing_error": northing_error,
-            "easting_error": easting_error,
+            "hpe": horizontal_error_2d, # Horizontal Position Error in meters
+            "northing_error": northing_error, # Northing error in meters
+            "easting_error": easting_error, # Easting error in meters
         }
         return processed_info
 
@@ -243,7 +250,7 @@ def processor_thread_func(
             Path(log_file_path).parent.mkdir(parents=True, exist_ok=True)
             log_file_handle = open(log_file_path, 'w', encoding='utf-8', newline='')
             # Write header to log file
-            header = "TimestampKST,Latitude,Longitude,FixType,HPE(m),NorthingError(m),EastingError(m),MessageRate(Hz)\n"
+            header = "TimestampKST,GNSSTime,Latitude,Longitude,FixType,HPE(m),NorthingError(m),EastingError(m),MessageRate(Hz)\n"
             log_file_handle.write(header)
             log_file_handle.flush() # Ensure header is written
             console_logger.info(f"[Processor] Logging report data lines to '{log_file_path}' enabled.")
@@ -272,6 +279,7 @@ def processor_thread_func(
                 msg_rate_from_q = data[1]
 
         if msg_str_from_q: # Check if a message was actually popped
+            # print(f"gt_lat: {gt_lat}, gt_lon: {gt_lon}")
             processed_info = evaluate_data(msg_str_from_q, gt_lat, gt_lon)
 
 
@@ -281,6 +289,7 @@ def processor_thread_func(
 
         if processed_info:
             ts_kst = processed_info.get('timestamp', "N/A")
+            gnss_time = processed_info.get('gnss_time', "N/A")
             lat_str = f"{processed_info.get('lat', 0.0):.6f}" if processed_info.get('lat') is not None else "N/A"
             lon_str = f"{processed_info.get('lon', 0.0):.6f}" if processed_info.get('lon') is not None else "N/A"
             fix_type = str(processed_info.get('fix_type', "N/A"))
@@ -289,23 +298,24 @@ def processor_thread_func(
             e_err_str = f"{processed_info.get('easting_error', 0.0):.2f}" if processed_info.get('easting_error') is not None else "N/A"
 
             report_data_fields_list = [
-                ts_kst, lat_str, lon_str, fix_type, hpe_str, n_err_str, e_err_str,
+                ts_kst, gnss_time, lat_str, lon_str, fix_type, hpe_str, n_err_str, e_err_str,
                 f"{msg_rate_from_q:.2f}" if msg_rate_from_q is not None else "N/A"
             ]
             console_report_str_parts = [
-                f"TS_KST:{ts_kst}", f"Lat:{lat_str}", f"Lon:{lon_str}", f"Type:{fix_type}",
-                f"HPE:{hpe_str}m", f"N_Err:{n_err_str}m", f"E_Err:{e_err_str}m",
-                f"MsgRate:{f'{msg_rate_from_q:.2f}' if msg_rate_from_q is not None else 'N/A'}msg/s"
+                f"TS_KST:{ts_kst}", f"GNSSTime:{gnss_time}",
+                f"Lat:{lat_str}", f"Lon:{lon_str}", f"Type:{fix_type}",
+                f"HPE(m):{hpe_str}", f"N_Err(m):{n_err_str}", f"E_Err(m):{e_err_str}",
+                f"MsgRate(msg/s):{f'{msg_rate_from_q:.2f}' if msg_rate_from_q is not None else 'N/A'}"
             ]
         else: # No valid processed_info (either no message from queue, or evaluate_data returned None)
             current_rate_str = f"{msg_rate_from_q:.2f}" if msg_rate_from_q is not None else "N/A"
-            report_data_fields_list = ["N/A"] * 7 + [current_rate_str] # 7 N/A fields + rate
-            console_report_str_parts = [f"MsgRate:{current_rate_str}msg/s", "(No valid GNSS data for this interval)"]
+            report_data_fields_list = ["N/A"] * 8 + [current_rate_str] # 8 N/A fields + rate
+            console_report_str_parts = [f"MsgRate(msg/s):{current_rate_str}", "(No valid GNSS data for this interval)"]
 
 
         console_logger.info(f"CONSOLE_REPORT | {' | '.join(console_report_str_parts)} (Report @ {eval_hz}Hz)")
 
-        if log_file_handle:
+        if processed_info and log_file_handle:
             try:
                 log_file_handle.write(','.join(map(str, report_data_fields_list)) + "\n")
                 log_file_handle.flush() # Ensure data is written to disk periodically
