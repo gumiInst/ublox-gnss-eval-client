@@ -1,6 +1,7 @@
 pyproj
 nuitka
 pyyaml
+tzdata
 
 
 
